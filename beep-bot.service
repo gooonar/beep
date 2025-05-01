@@ -1,0 +1,15 @@
+[Unit]
+Description=Beep Bot Service
+After=network.target
+
+[Service]
+Type=simple
+User=azureuser
+WorkingDirectory=/home/azureuser/boop/beep
+Environment="PATH=/home/azureuser/boop/beep/venv/bin"
+ExecStart=/home/azureuser/boop/beep/venv/bin/python3 src/main.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target 

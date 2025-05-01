@@ -234,7 +234,8 @@ def check_new_tokens(last_seen_token_id: str = None) -> str:
 def main() -> None:
     """Main function to run the bot."""
     print("Starting token monitoring bot...")
-    
+    notified_tokens.clear()  # Clear any existing state
+    time.sleep(5)  # Wait 5 seconds to avoid picking up old tokens
     last_seen_token_id = None
     
     def check_with_cursor():
