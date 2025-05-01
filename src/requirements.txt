@@ -1,0 +1,7 @@
+gql==3.4.1
+python-dotenv==1.0.0
+python-telegram-bot==20.7
+requests==2.31.0
+tweepy==4.14.0
+discord-webhook==1.2.1
+schedule==1.2.0
