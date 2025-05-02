@@ -178,6 +178,8 @@ def check_new_tokens(last_seen_token_id: str = None) -> str:
         has_more_pages = True
         current_cursor = None
         tokens_checked = 0
+        tokens_after_last_seen = 0  # Track how many tokens we've seen after the last seen token
+        found_last_seen = False  # Track if we've found the last seen token
         
         while has_more_pages:
             print(f"\nFetching page with cursor: {current_cursor}")
@@ -206,13 +208,21 @@ def check_new_tokens(last_seen_token_id: str = None) -> str:
                 token_data = token["node"]
                 creator = token_data["creator"]
                 
-                # Skip if we've already seen this token
+                # Check if this is the last seen token
                 if last_seen_token_id and token_data["id"] == last_seen_token_id:
-                    print(f"Found previously seen token {token_data['name']}, stopping check")
-                    return last_seen_token_id
+                    print(f"Found previously seen token {token_data['name']}, checking 10 more tokens")
+                    found_last_seen = True
+                    continue
+                
+                # If we've found the last seen token, count how many more we check
+                if found_last_seen:
+                    tokens_after_last_seen += 1
+                    if tokens_after_last_seen >= 10:
+                        print(f"Checked 10 tokens after last seen token, stopping check")
+                        return newest_token_id
                 
                 # Skip if creator is in the blacklist
-                if creator and creator["twitterUsername"] in ["andreusLFG", "CrewCRO", "toruk_m4kt0_", "grok"]:
+                if creator and creator["twitterUsername"] in ["andreusLFG", "CrewCRO", "toruk_m4kt0_", "grok", "SharkyWeb3", "AskPerplexity", "aixbt_agent"]:
                     print(f"Skipping token from {creator['twitterUsername']}: {token_data['name']}")
                     continue
                 
@@ -237,6 +247,10 @@ def check_new_tokens(last_seen_token_id: str = None) -> str:
                     print(f"Found token from account with {followers} followers: {token_data['name']}")
                     send_notification(token_data, followers)
             
+            # If we've found the last seen token and checked 10 more, we can stop
+            if found_last_seen and tokens_after_last_seen >= 10:
+                break
+                
             # Check if we need to fetch more pages
             has_more_pages = page_info["hasNextPage"]
             current_cursor = page_info["endCursor"]
