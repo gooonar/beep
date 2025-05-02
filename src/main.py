@@ -199,9 +199,9 @@ def check_new_tokens(last_seen_token_id: str = None) -> str:
                     print(f"Found previously seen token {token_data['name']}, stopping check")
                     return last_seen_token_id
                 
-                # Skip if creator is andreusLFG
-                if creator and creator["twitterUsername"] == "andreusLFG":
-                    print(f"Skipping token from andreusLFG: {token_data['name']}")
+                # Skip if creator is in the blacklist
+                if creator and creator["twitterUsername"] in ["andreusLFG", "CrewCRO"]:
+                    print(f"Skipping token from {creator['twitterUsername']}: {token_data['name']}")
                     continue
                 
                 # Parse the token's creation time (already UTC)
