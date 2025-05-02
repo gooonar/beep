@@ -17,7 +17,7 @@ load_dotenv()
 # Configuration
 BOOP_GRAPHQL_URL = "https://graphql-mainnet.boop.works/graphql"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = "-1002467782426"  # Updated to the new supergroup ID
+TELEGRAM_CHAT_ID = "-1001537403051"  # Updated to the new supergroup ID
 TWEETSCOUT_API_KEY = os.getenv("TWEETSCOUT_API_KEY")
 
 # Initialize Telegram bot
@@ -199,6 +199,11 @@ def check_new_tokens(last_seen_token_id: str = None) -> str:
                     print(f"Found previously seen token {token_data['name']}, stopping check")
                     return last_seen_token_id
                 
+                # Skip if creator is andreusLFG
+                if creator and creator["twitterUsername"] == "andreusLFG":
+                    print(f"Skipping token from andreusLFG: {token_data['name']}")
+                    continue
+                
                 # Parse the token's creation time (already UTC)
                 token_created_at = datetime.fromisoformat(token_data["createdAt"].replace("Z", "+00:00"))
                 
@@ -213,7 +218,7 @@ def check_new_tokens(last_seen_token_id: str = None) -> str:
                     
                 followers = get_twitter_followers(creator["twitterUsername"])
                 
-                if followers and followers > 20000:  # Changed from 100 to 20000
+                if followers and followers > 100000:  # Changed from 100 to 20000
                     print(f"Found token from account with {followers} followers: {token_data['name']}")
                     send_notification(token_data, followers)
             
