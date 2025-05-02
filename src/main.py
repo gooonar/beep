@@ -163,15 +163,22 @@ def send_notification(token_data: Dict, follower_count: int) -> None:
 def check_new_tokens(last_seen_token_id: str = None) -> str:
     """Check for new tokens and send notifications for high-follower creators."""
     try:
+        print(f"\nStarting new check cycle at {datetime.now(timezone.utc)}")
+        print(f"Last seen token ID: {last_seen_token_id}")
+        
         # Calculate the timestamp for 30 seconds ago, making it UTC aware
-        thirty_seconds_ago = datetime.now(timezone.utc) - timedelta(seconds=30)
+        # Add a 5-second buffer to prevent missing tokens at the boundary
+        thirty_seconds_ago = datetime.now(timezone.utc) - timedelta(seconds=35)
+        print(f"Looking for tokens newer than: {thirty_seconds_ago}")
         
         # Track the newest token ID we've seen in this batch
         newest_token_id = None
         has_more_pages = True
         current_cursor = None
+        tokens_checked = 0
         
         while has_more_pages:
+            print(f"\nFetching page with cursor: {current_cursor}")
             variables = {
                 "orderBy": "NEWEST",
                 "first": 100,  # Increased to get more tokens per request
@@ -185,10 +192,13 @@ def check_new_tokens(last_seen_token_id: str = None) -> str:
             
             tokens = result["tokens"]["edges"]
             page_info = result["tokens"]["pageInfo"]
+            tokens_checked += len(tokens)
+            print(f"Found {len(tokens)} tokens on this page")
             
             # If this is the first page, track the newest token ID
             if newest_token_id is None and tokens:
                 newest_token_id = tokens[0]["node"]["id"]
+                print(f"Newest token ID in this batch: {newest_token_id}")
             
             for token in tokens:
                 token_data = token["node"]
@@ -206,17 +216,20 @@ def check_new_tokens(last_seen_token_id: str = None) -> str:
                 
                 # Parse the token's creation time (already UTC)
                 token_created_at = datetime.fromisoformat(token_data["createdAt"].replace("Z", "+00:00"))
+                print(f"Checking token {token_data['name']} created at {token_created_at}")
                 
-                # Since we're ordered by NEWEST, once we find a token older than 30 seconds,
+                # Since we're ordered by NEWEST, once we find a token older than 35 seconds,
                 # we can stop checking the rest as they'll all be older
                 if token_created_at < thirty_seconds_ago:
-                    print(f"Found token older than 30 seconds ({token_data['name']} - created at {token_created_at}), stopping check")
+                    print(f"Found token older than 35 seconds ({token_data['name']} - created at {token_created_at}), stopping check")
                     return newest_token_id
                 
                 if not creator or not creator["twitterUsername"]:
+                    print(f"Skipping token {token_data['name']} - no creator or Twitter username")
                     continue
                     
                 followers = get_twitter_followers(creator["twitterUsername"])
+                print(f"Twitter followers for {creator['twitterUsername']}: {followers}")
                 
                 if followers and followers > 100000:  # Changed from 100 to 20000
                     print(f"Found token from account with {followers} followers: {token_data['name']}")
@@ -225,11 +238,13 @@ def check_new_tokens(last_seen_token_id: str = None) -> str:
             # Check if we need to fetch more pages
             has_more_pages = page_info["hasNextPage"]
             current_cursor = page_info["endCursor"]
+            print(f"Has more pages: {has_more_pages}, next cursor: {current_cursor}")
             
-            # If we've seen a token older than 30 seconds, no need to fetch more pages
+            # If we've seen a token older than 35 seconds, no need to fetch more pages
             if not has_more_pages or current_cursor is None:
                 break
         
+        print(f"\nCheck cycle complete. Checked {tokens_checked} tokens.")
         return newest_token_id
                 
     except Exception as e:
