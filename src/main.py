@@ -124,10 +124,11 @@ async def send_telegram_notification(token_data: Dict, follower_count: int) -> N
     twitter_username = token_data['creator']['twitterUsername']
     twitter_link = f"https://twitter.com/{twitter_username}"
     
-    # Create DEXScreener, Solscan, and Boop links
+    # Create DEXScreener, Solscan, Boop, and Photon links
     dexscreener_link = f"https://dexscreener.com/solana/{token_data['address']}"
     solscan_link = f"https://solscan.io/token/{token_data['address']}"
     boop_link = f"https://boop.fun/tokens/{token_data['address']}"
+    photon_link = f"https://photon-sol.tinyastro.io/en/trade/{token_data['address']}"
     
     message = (
         "🚨 New Token Alert! 🚨\n\n"
@@ -138,7 +139,8 @@ async def send_telegram_notification(token_data: Dict, follower_count: int) -> N
         f"Created At: {token_data['createdAt']}\n\n"
         f"📊 <a href='{dexscreener_link}'>View on DEXScreener</a>\n"
         f"🔍 <a href='{solscan_link}'>View on Solscan</a>\n"
-        f"🎯 <a href='{boop_link}'>View on Boop.fun</a>"
+        f"🎯 <a href='{boop_link}'>View on Boop.fun</a>\n"
+        f"💫 <a href='{photon_link}'>Trade on Photon</a>"
     )
     
     try:
@@ -210,7 +212,7 @@ def check_new_tokens(last_seen_token_id: str = None) -> str:
                     return last_seen_token_id
                 
                 # Skip if creator is in the blacklist
-                if creator and creator["twitterUsername"] in ["andreusLFG", "CrewCRO", "toruk_m4kt0_"]:
+                if creator and creator["twitterUsername"] in ["andreusLFG", "CrewCRO", "toruk_m4kt0_", "grok"]:
                     print(f"Skipping token from {creator['twitterUsername']}: {token_data['name']}")
                     continue
                 
