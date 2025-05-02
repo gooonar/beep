@@ -200,7 +200,7 @@ def check_new_tokens(last_seen_token_id: str = None) -> str:
                     return last_seen_token_id
                 
                 # Skip if creator is in the blacklist
-                if creator and creator["twitterUsername"] in ["andreusLFG", "CrewCRO"]:
+                if creator and creator["twitterUsername"] in ["andreusLFG", "CrewCRO", "toruk_m4kt0_"]:
                     print(f"Skipping token from {creator['twitterUsername']}: {token_data['name']}")
                     continue
                 
