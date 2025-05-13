@@ -213,6 +213,34 @@ def extract_contract_address(token_link: str) -> str:
     # The last part of the URL is the contract address
     return token_link.split('/')[-1]
 
+def extract_coin_details(tweet_text: str) -> tuple:
+    """Extract coin name and ticker from tweet text."""
+    try:
+        # Pattern to match name and ticker, e.g., 'beliver forever' (BFRVR)
+        pattern = r"'([^']+)'\s*\(([^)]+)\)"
+        match = re.search(pattern, tweet_text)
+        
+        if match:
+            coin_name = match.group(1).strip()
+            ticker = match.group(2).strip()
+            print(f"Extracted coin name: {coin_name}, ticker: {ticker}")
+            return coin_name, ticker
+        
+        # Fallback pattern for different formatting
+        pattern = r"coin\s+['\"]?([^'\"()]+)['\"]?\s*\(([^)]+)\)"
+        match = re.search(pattern, tweet_text)
+        if match:
+            coin_name = match.group(1).strip()
+            ticker = match.group(2).strip()
+            print(f"Extracted coin name: {coin_name}, ticker: {ticker}")
+            return coin_name, ticker
+            
+        print("Could not extract coin name and ticker from tweet")
+        return None, None
+    except Exception as e:
+        print(f"Error extracting coin details: {e}")
+        return None, None
+
 async def send_telegram_message(message: str) -> bool:
     """Send a message to Telegram with proper error handling, creating a new Bot instance each time."""
     global notification_backoff, last_notification_time
@@ -462,6 +490,9 @@ def check_launchcoin_activity() -> None:
                 print(f"No token link found in tweet {tweet_id}, skipping")
                 mark_tweet_processed(tweet_id)
                 continue
+            
+            # Extract coin name and ticker
+            coin_name, ticker = extract_coin_details(text)
                 
             # Get the username being replied to
             replied_to_username = tweet.get("replied_to_user", {}).get("username", "unknown")
@@ -509,11 +540,16 @@ def check_launchcoin_activity() -> None:
             twitter_link = f"https://twitter.com/{replied_to_username}"
             tweet_link = f"https://twitter.com/{LAUNCHCOIN_USERNAME}/status/{tweet_id}"
             
-            # Build the notification message
+            # Build the notification message with coin name and ticker if available
+            coin_info = ""
+            if coin_name and ticker:
+                coin_info = f"Coin: <b>{coin_name}</b> (<code>{ticker}</code>)\n"
+            
             message = (
                 "🚀 New Token Launch Detected! 🚀\n\n"
                 f"Account: <a href='{twitter_link}'>@{replied_to_username}</a> ({followers:,} followers)\n"
-                f"Trust: {trust_level}\n\n"
+                f"Trust: {trust_level}\n"
+                f"{coin_info}"
                 f"Contract: <code>{contract_address}</code>\n\n"
                 f"🔍 <a href='{token_link}'>View on Believe</a>\n"
                 f"🐦 <a href='{tweet_link}'>View Launch Tweet</a>"
