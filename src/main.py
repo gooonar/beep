@@ -2,80 +2,76 @@ import os
 import time
 import asyncio
 import requests
+import json
+import re
+import pickle
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from dotenv import load_dotenv
-from gql import Client, gql
-from gql.transport.requests import RequestsHTTPTransport
-from telegram import Bot
+from telegram import Bot, request
+from telegram.request import HTTPXRequest
 import schedule
 
 # Load environment variables
 load_dotenv()
 
 # Configuration
-BOOP_GRAPHQL_URL = "https://graphql-mainnet.boop.works/graphql"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = "-1001537403051"  # Updated to the new supergroup ID
 TWEETSCOUT_API_KEY = os.getenv("TWEETSCOUT_API_KEY")
+LAUNCHCOIN_USERNAME = "launchcoin"  # Username to monitor for replies
+FOLLOWER_THRESHOLD = 2000  # Minimum followers to trigger notification
+MIN_TRUST_SCORE = 80  # Minimum trust score to allow notifications
 
-# Initialize Telegram bot
-telegram_bot = Bot(token=TELEGRAM_BOT_TOKEN)
+# File to store processed tweet IDs
+PROCESSED_TWEETS_FILE = "processed_tweets.pkl"
 
-# Create event loop for async operations
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
+# Initialize Telegram bot with custom connection pool settings
+telegram_request = HTTPXRequest(connection_pool_size=8, connect_timeout=10.0, read_timeout=10.0, pool_timeout=20.0)
+telegram_bot = Bot(token=TELEGRAM_BOT_TOKEN, request=telegram_request)
 
-# Track tokens we've already notified about
-notified_tokens = set()
+# Track tweets we've already notified about
+notified_tweets = set()
+
+# Track processed tweet IDs to prevent duplicates
+processed_tweet_ids = set()
+
+# Track when we last checked for tweets
+last_tweet_check = None
 
 # Track TweetScout API requests
 tweetscout_request_count = 0
 
-# Initialize GraphQL client
-transport = RequestsHTTPTransport(
-    url=BOOP_GRAPHQL_URL,
-    headers={
-        'accept': 'application/graphql-response+json, application/json',
-        'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
-        'content-type': 'application/json',
-        'origin': 'https://boop.fun',
-        'referer': 'https://boop.fun/'
-    }
-)
-client = Client(transport=transport, fetch_schema_from_transport=False)
+# Load previously processed tweet IDs if file exists
+def load_processed_tweets():
+    global processed_tweet_ids
+    try:
+        if os.path.exists(PROCESSED_TWEETS_FILE):
+            with open(PROCESSED_TWEETS_FILE, 'rb') as f:
+                processed_tweet_ids = pickle.load(f)
+            print(f"Loaded {len(processed_tweet_ids)} previously processed tweet IDs")
+        else:
+            print("No previously processed tweets file found")
+    except Exception as e:
+        print(f"Error loading processed tweets: {e}")
+        processed_tweet_ids = set()
 
-# Query to get latest tokens
-GET_TOKENS_QUERY = gql("""
-query GetTokens($orderBy: TokenOrderBy!, $after: String, $first: Int, $filter: TokensFilter) {
-  tokens(orderBy: $orderBy, after: $after, first: $first, filter: $filter) {
-    edges {
-      cursor
-      node {
-        id
-        name
-        symbol
-        address
-        createdAt
-        creator {
-          twitterUsername
-        }
-      }
-    }
-    pageInfo {
-      hasNextPage
-      endCursor
-    }
-  }
-}
-""")
+# Save processed tweet IDs to file
+def save_processed_tweets():
+    try:
+        with open(PROCESSED_TWEETS_FILE, 'wb') as f:
+            pickle.dump(processed_tweet_ids, f)
+        print(f"Saved {len(processed_tweet_ids)} processed tweet IDs")
+    except Exception as e:
+        print(f"Error saving processed tweets: {e}")
 
 def get_twitter_followers(username: str) -> Optional[int]:
     """Get the number of followers for a Twitter username using TweetScout API."""
     global tweetscout_request_count
     tweetscout_request_count += 1
     try:
+        print(f"Getting follower count for @{username}...")
         headers = {
             "Accept": "application/json",
             "Accept-Language": "en-GB,en-US;q=0.9,en;q=0.8",
@@ -104,189 +100,340 @@ def get_twitter_followers(username: str) -> Optional[int]:
         
         response.raise_for_status()
         data = response.json()
-        return data.get("followers_count", 0)
+        followers = data.get("followers_count", 0)
+        print(f"@{username} has {followers:,} followers")
+        return followers
     except Exception as e:
         print(f"Error getting followers for {username}: {e}")
         return None
 
-async def send_telegram_notification(token_data: Dict, follower_count: int) -> None:
-    """Send a Telegram notification about a new token."""
-    
-    # Skip if we've already notified about this token
-    if token_data["id"] in notified_tokens:
-        print(f"Already notified about token {token_data['name']}, skipping notification")
-        return
+def get_twitter_trust_score(username: str) -> Optional[int]:
+    """Get the trust score for a Twitter username using TweetScout API."""
+    global tweetscout_request_count
+    tweetscout_request_count += 1
+    try:
+        print(f"Getting trust score for @{username}...")
+        headers = {
+            "Accept": "application/json",
+            "ApiKey": TWEETSCOUT_API_KEY
+        }
         
-    # Add to notified set
-    notified_tokens.add(token_data["id"])
+        response = requests.get(
+            f"https://api.tweetscout.io/v2/score/{username}",
+            headers=headers
+        )
+        
+        response.raise_for_status()
+        data = response.json()
+        score = data.get("score", 0)
+        print(f"@{username} has a trust score of {score}")
+        return score
+    except Exception as e:
+        print(f"Error getting trust score for {username}: {e}")
+        return None
+
+def get_trust_level_emoji(score: int) -> str:
+    """Return a trust level description with emoji based on the score."""
+    # Round the score to 2 decimal places 
+    rounded_score = round(score, 2)
     
-    # Create clickable Twitter profile link
-    twitter_username = token_data['creator']['twitterUsername']
-    twitter_link = f"https://twitter.com/{twitter_username}"
+    if score >= 2000:
+        return f"🟢 Very High Trust (Score: {rounded_score})"
+    elif score >= 1000:
+        return f"🔵 High Trust (Score: {rounded_score})"
+    elif score >= 500:
+        return f"🟡 Moderate Trust (Score: {rounded_score})"
+    elif score >= 100:
+        return f"🟠 Low Trust (Score: {rounded_score})"
+    else:
+        return f"🔴 Untrusted (Score: {rounded_score})"
+
+def extract_token_link(tweet_text: str) -> Optional[str]:
+    """Extract any link from a tweet that indicates a token is live."""
+    if not tweet_text:
+        return None
+        
+    # Print the tweet text for debugging
+    print(f"Extracting link from: {tweet_text[:100]}...")
     
-    # Create DEXScreener, Solscan, Boop, and Photon links
-    dexscreener_link = f"https://dexscreener.com/solana/{token_data['address']}"
-    solscan_link = f"https://solscan.io/token/{token_data['address']}"
-    boop_link = f"https://boop.fun/tokens/{token_data['address']}"
-    photon_link = f"https://photon-sol.tinyastro.io/en/trade/{token_data['address']}"
+    # First try to find believe.app links
+    believe_pattern = r'https?://believe\.app/coin/[a-zA-Z0-9]+'
+    believe_match = re.search(believe_pattern, tweet_text)
+    if believe_match:
+        print(f"Found believe.app link: {believe_match.group(0)}")
+        return believe_match.group(0)
     
-    message = (
-        "🚨 New Token Alert! 🚨\n\n"
-        f"Name: {token_data['name']}\n"
-        f"Symbol: {token_data['symbol']}\n"
-        f"Creator: <a href='{twitter_link}'>@{twitter_username}</a> ({follower_count:,} followers)\n"
-        f"Contract: <code>{token_data['address']}</code>\n"
-        f"Created At: {token_data['createdAt']}\n\n"
-        f"📊 <a href='{dexscreener_link}'>View on DEXScreener</a>\n"
-        f"🔍 <a href='{solscan_link}'>View on Solscan</a>\n"
-        f"🎯 <a href='{boop_link}'>View on Boop.fun</a>\n"
-        f"💫 <a href='{photon_link}'>Trade on Photon</a>"
-    )
+    # Otherwise look for t.co shortened links
+    tco_pattern = r'https?://t\.co/[a-zA-Z0-9]+'
+    tco_match = re.search(tco_pattern, tweet_text)
+    if tco_match:
+        print(f"Found t.co link: {tco_match.group(0)}")
+        return tco_match.group(0)
     
+    # Look for any URL as a fallback
+    url_pattern = r'https?://\S+'
+    url_match = re.search(url_pattern, tweet_text)
+    if url_match:
+        print(f"Found generic URL: {url_match.group(0)}")
+        return url_match.group(0)
+    
+    print("No link found in the tweet text")
+    return None
+
+def extract_contract_address(token_link: str) -> str:
+    """Extract the contract address from a believe.app link."""
+    # The last part of the URL is the contract address
+    return token_link.split('/')[-1]
+
+async def send_telegram_message(message: str) -> bool:
+    """Send a message to Telegram with proper error handling."""
     try:
         await telegram_bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
             text=message,
-            parse_mode="HTML",  # Use HTML for better formatting control
-            disable_web_page_preview=True  # Don't preview the links
+            parse_mode="HTML",
+            disable_web_page_preview=True  # Don't preview links to keep message clean
         )
+        return True
     except Exception as e:
-        print(f"Error sending Telegram message: {e}")
-        # Remove from notified set if sending failed
-        notified_tokens.discard(token_data["id"])
+        print(f"❌ Error sending Telegram message: {e}")
+        return False
 
-def send_notification(token_data: Dict, follower_count: int) -> None:
-    """Wrapper to send notification in the event loop."""
+def send_telegram_notification(message: str) -> bool:
+    """Wrapper for sending Telegram notifications with proper event loop handling."""
     try:
-        loop.run_until_complete(send_telegram_notification(token_data, follower_count))
+        # Create a new event loop for each notification
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        
+        # Run the async function and get the result
+        result = new_loop.run_until_complete(send_telegram_message(message))
+        
+        # Close the loop properly
+        new_loop.close()
+        
+        return result
     except Exception as e:
-        print(f"Error in notification event loop: {e}")
+        print(f"❌ Error in Telegram notification event loop: {e}")
+        return False
 
-def check_new_tokens(last_seen_token_id: str = None) -> str:
-    """Check for new tokens and send notifications for high-follower creators."""
+def get_launchcoin_launches() -> List[Dict]:
+    """Get recent tweets from @launchcoin containing 'live' (indicating token launches)."""
+    global tweetscout_request_count
+    tweetscout_request_count += 1
     try:
-        print(f"\nStarting new check cycle at {datetime.now(timezone.utc)}")
-        print(f"Last seen token ID: {last_seen_token_id}")
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "ApiKey": TWEETSCOUT_API_KEY
+        }
         
-        # Calculate the timestamp for 30 seconds ago, making it UTC aware
-        # Add a 5-second buffer to prevent missing tokens at the boundary
-        thirty_seconds_ago = datetime.now(timezone.utc) - timedelta(seconds=35)
-        print(f"Looking for tokens newer than: {thirty_seconds_ago}")
+        # Using search-tweets to find tweets from launchcoin with "live" in them
+        # Add created_after parameter to get newer tweets
+        start_time = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
         
-        # Track the newest token ID we've seen in this batch
-        newest_token_id = None
-        has_more_pages = True
-        current_cursor = None
-        tokens_checked = 0
-        tokens_after_last_seen = 0  # Track how many tokens we've seen after the last seen token
-        found_last_seen = False  # Track if we've found the last seen token
+        data = {
+            "query": f"from:{LAUNCHCOIN_USERNAME} live",
+            "max_results": 50,
+            "start_time": start_time
+        }
         
-        while has_more_pages:
-            print(f"\nFetching page with cursor: {current_cursor}")
-            variables = {
-                "orderBy": "NEWEST",
-                "first": 100,  # Increased to get more tokens per request
-                "filter": {"includeNsfw": False}
-            }
-            
-            if current_cursor:
-                variables["after"] = current_cursor
-                
-            result = client.execute(GET_TOKENS_QUERY, variable_values=variables)
-            
-            tokens = result["tokens"]["edges"]
-            page_info = result["tokens"]["pageInfo"]
-            tokens_checked += len(tokens)
-            print(f"Found {len(tokens)} tokens on this page")
-            
-            # If this is the first page, track the newest token ID
-            if newest_token_id is None and tokens:
-                newest_token_id = tokens[0]["node"]["id"]
-                print(f"Newest token ID in this batch: {newest_token_id}")
-            
-            for token in tokens:
-                token_data = token["node"]
-                creator = token_data["creator"]
-                
-                # Check if this is the last seen token
-                if last_seen_token_id and token_data["id"] == last_seen_token_id:
-                    print(f"Found previously seen token {token_data['name']}, checking 10 more tokens")
-                    found_last_seen = True
-                    continue
-                
-                # If we've found the last seen token, count how many more we check
-                if found_last_seen:
-                    tokens_after_last_seen += 1
-                    if tokens_after_last_seen >= 10:
-                        print(f"Checked 10 tokens after last seen token, stopping check")
-                        return newest_token_id
-                
-                # Skip if creator is in the blacklist
-                if creator and creator["twitterUsername"] in ["andreusLFG", "CrewCRO", "toruk_m4kt0_", "grok", "SharkyWeb3", "AskPerplexity", "aixbt_agent", "PowderWeb3", "Poseidon_CTO", "AltGemHunter"]:
-                    print(f"Skipping token from {creator['twitterUsername']}: {token_data['name']}")
-                    continue
-                
-                # Parse the token's creation time (already UTC)
-                token_created_at = datetime.fromisoformat(token_data["createdAt"].replace("Z", "+00:00"))
-                print(f"Checking token {token_data['name']} created at {token_created_at}")
-                
-                # Since we're ordered by NEWEST, once we find a token older than 35 seconds,
-                # we can stop checking the rest as they'll all be older
-                if token_created_at < thirty_seconds_ago:
-                    print(f"Found token older than 35 seconds ({token_data['name']} - created at {token_created_at}), stopping check")
-                    return newest_token_id
-                
-                if not creator or not creator["twitterUsername"]:
-                    print(f"Skipping token {token_data['name']} - no creator or Twitter username")
-                    continue
-                    
-                followers = get_twitter_followers(creator["twitterUsername"])
-                print(f"Twitter followers for {creator['twitterUsername']}: {followers}")
-                
-                if followers and followers > 100000:  # Changed from 100 to 20000
-                    print(f"Found token from account with {followers} followers: {token_data['name']}")
-                    send_notification(token_data, followers)
-            
-            # If we've found the last seen token and checked 10 more, we can stop
-            if found_last_seen and tokens_after_last_seen >= 10:
-                break
-                
-            # Check if we need to fetch more pages
-            has_more_pages = page_info["hasNextPage"]
-            current_cursor = page_info["endCursor"]
-            print(f"Has more pages: {has_more_pages}, next cursor: {current_cursor}")
-            
-            # If we've seen a token older than 35 seconds, no need to fetch more pages
-            if not has_more_pages or current_cursor is None:
-                break
+        print(f"Searching for launch tweets from {LAUNCHCOIN_USERNAME} since {start_time}...")
+        response = requests.post(
+            "https://api.tweetscout.io/v2/search-tweets",
+            headers=headers,
+            json=data
+        )
         
-        print(f"\nCheck cycle complete. Checked {tokens_checked} tokens.")
-        return newest_token_id
+        response.raise_for_status()
+        result = response.json()
+        
+        print(f"API response status: {response.status_code}")
+        print(f"Response data keys: {result.keys() if result else 'None'}")
+        
+        if not result.get("tweets") and not result.get("data"):
+            print("No launch tweets found from @launchcoin")
+            return []
+        
+        # Handle different response formats
+        tweets = result.get("tweets", result.get("data", []))
+        print(f"Retrieved {len(tweets)} launch tweets from @launchcoin")
+        
+        # Debug: Print the first tweet to see its structure
+        if tweets:
+            first_tweet = tweets[0]
+            print(f"First tweet ID: {first_tweet.get('id_str')}")
+            print(f"First tweet text: {first_tweet.get('full_text') or first_tweet.get('text')}")
+        
+        launches = []
+        for tweet in tweets:
+            tweet_id = tweet.get("id_str")
+            
+            # Skip already processed tweets
+            if tweet_id in processed_tweet_ids:
+                print(f"Skipping already processed tweet {tweet_id}")
+                continue
+                
+            # Get the tweet text (full_text or text field)
+            text = tweet.get("full_text") or tweet.get("text", "")
+            
+            # Extract any link from the tweet
+            token_link = extract_token_link(text)
+            
+            if token_link:
+                print(f"Found token link in tweet {tweet_id}: {token_link}")
+                
+                # Extract the username this is replying to (if it's a reply)
+                username_match = re.search(r'^@(\w+)', text)
+                replied_to_username = username_match.group(1) if username_match else "unknown"
+                
+                tweet["replied_to_user"] = {"username": replied_to_username}
+                launches.append(tweet)
+            else:
+                print(f"No token link found in tweet {tweet_id}: {text[:100]}...")
+        
+        new_launches = [t for t in launches if t.get("id_str") not in processed_tweet_ids]
+        print(f"Found {len(new_launches)} new launch tweets with links from @launchcoin")
+        return new_launches
+    except Exception as e:
+        print(f"Error getting launch tweets from @launchcoin: {e}")
+        print(f"Response status code: {getattr(response, 'status_code', 'N/A')}")
+        print(f"Response text: {getattr(response, 'text', 'N/A')}")
+        return []
+
+def check_launchcoin_activity() -> None:
+    """Check for @launchcoin's tweets about token launches for high-follower accounts."""
+    global last_tweet_check
+    
+    current_time = datetime.now(timezone.utc)
+    if last_tweet_check is not None:
+        print(f"Checking for @launchcoin activity since {last_tweet_check}")
+    else:
+        print("Checking for @launchcoin activity (first run)")
+    
+    last_tweet_check = current_time
+    
+    try:
+        launch_tweets = get_launchcoin_launches()
+        
+        for tweet in launch_tweets:
+            tweet_id = tweet.get("id_str")
+            
+            # Get the tweet text
+            text = tweet.get("full_text") or tweet.get("text", "")
+            
+            # Get the token link
+            token_link = extract_token_link(text)
+            if not token_link:
+                print(f"No token link found in tweet {tweet_id}, skipping")
+                processed_tweet_ids.add(tweet_id)
+                continue
+                
+            # Get the username being replied to
+            replied_to_username = tweet.get("replied_to_user", {}).get("username", "unknown")
+            print(f"Found launch for @{replied_to_username} (Tweet ID: {tweet_id})")
+            
+            # Check follower count of the user being replied to
+            followers = get_twitter_followers(replied_to_username)
+            
+            if followers is None:
+                print(f"Couldn't get follower count for @{replied_to_username}, will try again later")
+                continue
+                
+            print(f"@{replied_to_username} has {followers:,} followers (threshold: {FOLLOWER_THRESHOLD:,})")
+            
+            # Get trust score for the account
+            trust_score = get_twitter_trust_score(replied_to_username)
+            if trust_score is None:
+                print(f"Couldn't get trust score for @{replied_to_username}, will try again later")
+                continue
+                
+            trust_level = get_trust_level_emoji(trust_score)
+            
+            # Skip if the account is untrusted (below the min trust score)
+            if trust_score < MIN_TRUST_SCORE:
+                print(f"⛔ Skipping tweet for @{replied_to_username} - untrusted account (Trust score: {trust_score})")
+                processed_tweet_ids.add(tweet_id)
+                save_processed_tweets()
+                continue
+                
+            if followers >= FOLLOWER_THRESHOLD:
+                print(f"✅ Found launch for account with {followers:,} followers: @{replied_to_username}")
+                print(f"Token link: {token_link}")
+                
+                # Extract contract address from the token link
+                contract_address = extract_contract_address(token_link)
+                
+                # Create links
+                twitter_link = f"https://twitter.com/{replied_to_username}"
+                tweet_link = f"https://twitter.com/{LAUNCHCOIN_USERNAME}/status/{tweet_id}"
+                
+                # Build the notification message
+                message = (
+                    "🚀 New Token Launch Detected! 🚀\n\n"
+                    f"Account: <a href='{twitter_link}'>@{replied_to_username}</a> ({followers:,} followers)\n"
+                    f"Trust: {trust_level}\n\n"
+                    f"Contract: <code>{contract_address}</code>\n\n"
+                    f"🔍 <a href='{token_link}'>View on Believe</a>\n"
+                    f"🐦 <a href='{tweet_link}'>View Launch Tweet</a>"
+                )
+                
+                # Send notification using the robust method
+                notification_sent = send_telegram_notification(message)
+                
+                if notification_sent:
+                    print(f"✓ Sent notification to Telegram for @{replied_to_username}")
+                    # Mark as processed after successful notification
+                    processed_tweet_ids.add(tweet_id)
+                    save_processed_tweets()
+                else:
+                    print(f"⚠️ Failed to send notification for @{replied_to_username}, will try again later")
+                    # Wait a bit before trying the next notification to avoid overwhelming the pool
+                    time.sleep(3)  
+            else:
+                print(f"⛔ Skipping tweet for @{replied_to_username} - only has {followers:,} followers (below threshold of {FOLLOWER_THRESHOLD:,})")
+                # Mark lower-follower accounts as processed too
+                processed_tweet_ids.add(tweet_id)
+                save_processed_tweets()
                 
     except Exception as e:
-        print(f"Error checking tokens: {e}")
-        return last_seen_token_id
+        print(f"Error checking @launchcoin activity: {e}")
+        import traceback
+        traceback.print_exc()
 
 def main() -> None:
     """Main function to run the bot."""
-    print("Starting token monitoring bot...")
-    notified_tokens.clear()  # Clear any existing state
-    time.sleep(5)  # Wait 5 seconds to avoid picking up old tokens
-    last_seen_token_id = None
+    print("===== Starting LaunchCoin Monitor Bot =====")
+    print(f"Looking for accounts with {FOLLOWER_THRESHOLD:,}+ followers")
+    print(f"Only showing accounts with trust score above {MIN_TRUST_SCORE}")
+    notified_tweets.clear()  # Clear any existing tweet state
     
-    def check_with_cursor():
-        nonlocal last_seen_token_id
-        last_seen_token_id = check_new_tokens(last_seen_token_id)
+    # Load previously processed tweets
+    load_processed_tweets()
+    
+    time.sleep(2)  # Brief pause before starting
     
     # Run immediately on startup
-    check_with_cursor()
+    check_launchcoin_activity()
     
-    # Schedule to run every 5 seconds
-    schedule.every(5).seconds.do(check_with_cursor)
+    # Schedule to run every 30 seconds for launchcoin activity
+    print(f"Scheduling LaunchCoin checks every 12 seconds")
+    schedule.every(0.2).minutes.do(check_launchcoin_activity)
     
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+    try:
+        print("Bot is running. Press CTRL+C to stop.")
+        while True:
+            schedule.run_pending()
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\nSaving processed tweets before exit...")
+        save_processed_tweets()
+        print("Bot stopped by user.")
+    except Exception as e:
+        print(f"Unexpected error: {e}")
+        save_processed_tweets()
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
     main()
