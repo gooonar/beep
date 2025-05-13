@@ -35,8 +35,7 @@ telegram_request = HTTPXRequest(
     connection_pool_size=16,        # Increased pool size
     connect_timeout=15.0,           # Longer connect timeout
     read_timeout=30.0,              # Longer read timeout
-    pool_timeout=60.0,              # Much longer pool timeout
-    connection_pool_ttl=1200.0      # Force connections to close after 20 minutes
+    pool_timeout=60.0               # Much longer pool timeout
 )
 telegram_bot = Bot(token=TELEGRAM_BOT_TOKEN, request=telegram_request)
 
