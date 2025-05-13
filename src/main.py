@@ -21,8 +21,8 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = "-1001537403051"  # Updated to the new supergroup ID
 TWEETSCOUT_API_KEY = os.getenv("TWEETSCOUT_API_KEY")
 LAUNCHCOIN_USERNAME = "launchcoin"  # Username to monitor for replies
-FOLLOWER_THRESHOLD = 2000  # Minimum followers to trigger notification
-MIN_TRUST_SCORE = 80  # Minimum trust score to allow notifications
+FOLLOWER_THRESHOLD = 20000  # Minimum followers to trigger notification
+MIN_TRUST_SCORE = 100 # Minimum trust score to allow notifications
 
 # File to store processed tweet IDs
 PROCESSED_TWEETS_FILE = "processed_tweets.pkl"
