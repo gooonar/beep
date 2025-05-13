@@ -433,8 +433,8 @@ def check_launchcoin_activity() -> None:
         launch_tweets = get_launchcoin_launches()
         
         # Process each tweet
-        for tweet in launch_tweets:
-            tweet_id = tweet.get("id_str")
+        for i, tweet in enumerate(launch_tweets):
+            tweet_id = tweet.get("id_str", "unknown_id")
             
             # Skip already processed tweets
             if is_tweet_processed(tweet_id):
@@ -529,7 +529,7 @@ def check_launchcoin_activity() -> None:
                 pending_notifications.append((message, tweet_id, datetime.now()))
                 
                 # Only wait if we're still processing more items
-                if launch_tweets.index(tweet) < len(launch_tweets) - 1:
+                if i < len(launch_tweets) - 1:
                     wait_time = notification_backoff + (random.random() * 2)  # Add jitter
                     print(f"Applying backoff of {wait_time:.2f} seconds before next notification attempt")
                     time.sleep(wait_time)
@@ -545,7 +545,7 @@ def main() -> None:
     print(f"Looking for accounts with {FOLLOWER_THRESHOLD:,}+ followers")
     print(f"Only showing accounts with trust score above {MIN_TRUST_SCORE}")
     print(f"Maximum tweet history: {MAX_STORED_TWEET_IDS} tweets")
-    print(f"Telegram connection pool size: {telegram_request.connection_pool_size}")
+    print(f"Using enhanced Telegram connection settings (16 connections, extended timeouts)")
     notified_tweets.clear()  # Clear any existing tweet state
     
     # Load previously processed tweets
