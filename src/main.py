@@ -5,6 +5,7 @@ import requests
 import json
 import re
 import pickle
+import random
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set, Tuple
 from collections import deque
@@ -29,9 +30,20 @@ MAX_STORED_TWEET_IDS = 5000  # Maximum number of tweet IDs to store
 # File to store processed tweet IDs
 PROCESSED_TWEETS_FILE = "processed_tweets.pkl"
 
-# Initialize Telegram bot with custom connection pool settings
-telegram_request = HTTPXRequest(connection_pool_size=8, connect_timeout=10.0, read_timeout=10.0, pool_timeout=20.0)
+# Enhanced Telegram connection settings
+telegram_request = HTTPXRequest(
+    connection_pool_size=16,        # Increased pool size
+    connect_timeout=15.0,           # Longer connect timeout
+    read_timeout=30.0,              # Longer read timeout
+    pool_timeout=60.0,              # Much longer pool timeout
+    connection_pool_ttl=1200.0      # Force connections to close after 20 minutes
+)
 telegram_bot = Bot(token=TELEGRAM_BOT_TOKEN, request=telegram_request)
+
+# Track notification status
+pending_notifications = []  # Store failed notifications for retry
+last_notification_time = None
+notification_backoff = 1  # Initial backoff in seconds
 
 # Track tweets we've already notified about
 notified_tweets = set()
@@ -213,20 +225,47 @@ def extract_contract_address(token_link: str) -> str:
 
 async def send_telegram_message(message: str) -> bool:
     """Send a message to Telegram with proper error handling."""
+    global notification_backoff, last_notification_time
+    
+    # Implement time-based throttling to prevent overwhelming the API
+    if last_notification_time:
+        # Calculate time since last notification
+        elapsed = (datetime.now() - last_notification_time).total_seconds()
+        
+        # If we sent a notification very recently, add a small delay
+        if elapsed < 2:
+            delay = 2 - elapsed + (random.random() * 2)  # Add jitter
+            print(f"Throttling notification, waiting {delay:.2f} seconds")
+            await asyncio.sleep(delay)
+    
     try:
+        # Update the last notification time
+        last_notification_time = datetime.now()
+        
+        # Send the message
         await telegram_bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
             text=message,
             parse_mode="HTML",
             disable_web_page_preview=True  # Don't preview links to keep message clean
         )
+        
+        # Reset backoff on success
+        notification_backoff = 1
         return True
     except Exception as e:
         print(f"❌ Error sending Telegram message: {e}")
+        
+        # Implement exponential backoff
+        notification_backoff = min(notification_backoff * 2, 60)  # Cap at 60 seconds
+        print(f"Setting notification backoff to {notification_backoff} seconds")
+        
         return False
 
 def send_telegram_notification(message: str) -> bool:
     """Wrapper for sending Telegram notifications with proper event loop handling."""
+    global notification_backoff
+    
     try:
         # Create a new event loop for each notification
         new_loop = asyncio.new_event_loop()
@@ -235,13 +274,54 @@ def send_telegram_notification(message: str) -> bool:
         # Run the async function and get the result
         result = new_loop.run_until_complete(send_telegram_message(message))
         
-        # Close the loop properly
+        # Close the loop properly to release resources
         new_loop.close()
         
         return result
     except Exception as e:
         print(f"❌ Error in Telegram notification event loop: {e}")
+        
+        # Add backoff even for event loop errors
+        notification_backoff = min(notification_backoff * 2, 60)
+        
         return False
+
+# Function to handle notification retries
+def retry_pending_notifications():
+    """Retry sending any failed notifications with an increasing backoff."""
+    global pending_notifications
+    
+    if not pending_notifications:
+        return
+    
+    print(f"Attempting to retry {len(pending_notifications)} pending notifications")
+    
+    # Make a copy and clear the original to avoid race conditions
+    notifications_to_retry = pending_notifications.copy()
+    pending_notifications = []
+    
+    for notification in notifications_to_retry:
+        # Extract data from the notification
+        message, tweet_id, timestamp = notification
+        
+        # Skip very old notifications
+        if (datetime.now() - timestamp).total_seconds() > 3600:  # Older than 1 hour
+            print(f"Discarding old notification for tweet {tweet_id}, too old to retry")
+            continue
+        
+        print(f"Retrying notification for tweet {tweet_id}")
+        result = send_telegram_notification(message)
+        
+        if result:
+            print(f"✓ Successfully sent delayed notification for tweet {tweet_id}")
+            mark_tweet_processed(tweet_id)
+            save_processed_tweets()
+        else:
+            # Put it back in the queue with the updated timestamp
+            pending_notifications.append((message, tweet_id, datetime.now()))
+            
+            # Add a delay to prevent hammering the API
+            time.sleep(1)
 
 def get_launchcoin_launches() -> List[Dict]:
     """Get recent tweets from @launchcoin containing 'live' (indicating token launches)."""
@@ -331,7 +411,7 @@ def get_launchcoin_launches() -> List[Dict]:
 
 def check_launchcoin_activity() -> None:
     """Check for @launchcoin's tweets about token launches for high-follower accounts."""
-    global last_tweet_check
+    global last_tweet_check, notification_backoff
     
     current_time = datetime.now(timezone.utc)
     if last_tweet_check is not None:
@@ -342,8 +422,18 @@ def check_launchcoin_activity() -> None:
     last_tweet_check = current_time
     
     try:
+        # First, retry any pending notifications
+        if pending_notifications:
+            # Only retry if we have waited long enough since the last error
+            if last_notification_time is None or (datetime.now() - last_notification_time).total_seconds() > notification_backoff:
+                retry_pending_notifications()
+            else:
+                print(f"Skipping notification retries, backoff time not elapsed ({notification_backoff}s)")
+        
+        # Get new launches
         launch_tweets = get_launchcoin_launches()
         
+        # Process each tweet
         for tweet in launch_tweets:
             tweet_id = tweet.get("id_str")
             
@@ -418,6 +508,14 @@ def check_launchcoin_activity() -> None:
                 f"🐦 <a href='{tweet_link}'>View Launch Tweet</a>"
             )
             
+            # Wait before sending if we need to backoff
+            if notification_backoff > 1 and last_notification_time is not None:
+                elapsed = (datetime.now() - last_notification_time).total_seconds()
+                if elapsed < notification_backoff:
+                    wait_time = notification_backoff - elapsed
+                    print(f"Applying backoff, waiting {wait_time:.2f} seconds before trying to send notification")
+                    time.sleep(wait_time)
+            
             # Send notification using the robust method
             notification_sent = send_telegram_notification(message)
             
@@ -427,9 +525,15 @@ def check_launchcoin_activity() -> None:
                 mark_tweet_processed(tweet_id)
                 save_processed_tweets()
             else:
-                print(f"⚠️ Failed to send notification for @{replied_to_username}, will try again later")
-                # Wait a bit before trying the next notification to avoid overwhelming the pool
-                time.sleep(3)
+                print(f"⚠️ Failed to send notification for @{replied_to_username}, will retry later")
+                # Store the failed notification for later retry
+                pending_notifications.append((message, tweet_id, datetime.now()))
+                
+                # Only wait if we're still processing more items
+                if launch_tweets.index(tweet) < len(launch_tweets) - 1:
+                    wait_time = notification_backoff + (random.random() * 2)  # Add jitter
+                    print(f"Applying backoff of {wait_time:.2f} seconds before next notification attempt")
+                    time.sleep(wait_time)
                 
     except Exception as e:
         print(f"Error checking @launchcoin activity: {e}")
@@ -442,6 +546,7 @@ def main() -> None:
     print(f"Looking for accounts with {FOLLOWER_THRESHOLD:,}+ followers")
     print(f"Only showing accounts with trust score above {MIN_TRUST_SCORE}")
     print(f"Maximum tweet history: {MAX_STORED_TWEET_IDS} tweets")
+    print(f"Telegram connection pool size: {telegram_request.connection_pool_size}")
     notified_tweets.clear()  # Clear any existing tweet state
     
     # Load previously processed tweets
