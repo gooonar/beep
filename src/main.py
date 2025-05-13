@@ -7,6 +7,7 @@ import re
 import pickle
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Set, Tuple
+from collections import deque
 
 from dotenv import load_dotenv
 from telegram import Bot, request
@@ -22,7 +23,8 @@ TELEGRAM_CHAT_ID = "-1001537403051"  # Updated to the new supergroup ID
 TWEETSCOUT_API_KEY = os.getenv("TWEETSCOUT_API_KEY")
 LAUNCHCOIN_USERNAME = "launchcoin"  # Username to monitor for replies
 FOLLOWER_THRESHOLD = 20000  # Minimum followers to trigger notification
-MIN_TRUST_SCORE = 100 # Minimum trust score to allow notifications
+MIN_TRUST_SCORE = 80  # Minimum trust score to allow notifications
+MAX_STORED_TWEET_IDS = 5000  # Maximum number of tweet IDs to store
 
 # File to store processed tweet IDs
 PROCESSED_TWEETS_FILE = "processed_tweets.pkl"
@@ -34,8 +36,8 @@ telegram_bot = Bot(token=TELEGRAM_BOT_TOKEN, request=telegram_request)
 # Track tweets we've already notified about
 notified_tweets = set()
 
-# Track processed tweet IDs to prevent duplicates
-processed_tweet_ids = set()
+# Track processed tweet IDs to prevent duplicates using a deque for rotation
+processed_tweet_ids = deque(maxlen=MAX_STORED_TWEET_IDS)
 
 # Track when we last checked for tweets
 last_tweet_check = None
@@ -49,22 +51,46 @@ def load_processed_tweets():
     try:
         if os.path.exists(PROCESSED_TWEETS_FILE):
             with open(PROCESSED_TWEETS_FILE, 'rb') as f:
-                processed_tweet_ids = pickle.load(f)
-            print(f"Loaded {len(processed_tweet_ids)} previously processed tweet IDs")
+                loaded_ids = pickle.load(f)
+                
+                # Handle conversion from set to deque if needed
+                if isinstance(loaded_ids, set):
+                    print(f"Converting set of {len(loaded_ids)} IDs to deque with max length {MAX_STORED_TWEET_IDS}")
+                    # Initialize deque with the most recent IDs if we have too many
+                    if len(loaded_ids) > MAX_STORED_TWEET_IDS:
+                        # Convert to list, sort by ID (newer IDs are typically larger), and take the most recent
+                        sorted_ids = sorted(loaded_ids, reverse=True)[:MAX_STORED_TWEET_IDS]
+                        processed_tweet_ids = deque(sorted_ids, maxlen=MAX_STORED_TWEET_IDS)
+                    else:
+                        processed_tweet_ids = deque(loaded_ids, maxlen=MAX_STORED_TWEET_IDS)
+                else:
+                    # If it's already a deque, just update maxlen if needed
+                    processed_tweet_ids = deque(loaded_ids, maxlen=MAX_STORED_TWEET_IDS)
+                
+            print(f"Loaded {len(processed_tweet_ids)} previously processed tweet IDs (max capacity: {MAX_STORED_TWEET_IDS})")
         else:
             print("No previously processed tweets file found")
+            processed_tweet_ids = deque(maxlen=MAX_STORED_TWEET_IDS)
     except Exception as e:
         print(f"Error loading processed tweets: {e}")
-        processed_tweet_ids = set()
+        processed_tweet_ids = deque(maxlen=MAX_STORED_TWEET_IDS)
 
 # Save processed tweet IDs to file
 def save_processed_tweets():
     try:
         with open(PROCESSED_TWEETS_FILE, 'wb') as f:
             pickle.dump(processed_tweet_ids, f)
-        print(f"Saved {len(processed_tweet_ids)} processed tweet IDs")
+        print(f"Saved {len(processed_tweet_ids)} processed tweet IDs (max capacity: {MAX_STORED_TWEET_IDS})")
     except Exception as e:
         print(f"Error saving processed tweets: {e}")
+
+# Add a tweet ID to the processed set with automatic rotation
+def mark_tweet_processed(tweet_id):
+    # If we're at capacity, the oldest ID will be automatically removed
+    processed_tweet_ids.append(tweet_id)
+
+def is_tweet_processed(tweet_id):
+    return tweet_id in processed_tweet_ids
 
 def get_twitter_followers(username: str) -> Optional[int]:
     """Get the number of followers for a Twitter username using TweetScout API."""
@@ -270,7 +296,7 @@ def get_launchcoin_launches() -> List[Dict]:
             tweet_id = tweet.get("id_str")
             
             # Skip already processed tweets
-            if tweet_id in processed_tweet_ids:
+            if is_tweet_processed(tweet_id):
                 print(f"Skipping already processed tweet {tweet_id}")
                 continue
                 
@@ -291,8 +317,10 @@ def get_launchcoin_launches() -> List[Dict]:
                 launches.append(tweet)
             else:
                 print(f"No token link found in tweet {tweet_id}: {text[:100]}...")
+                # Mark tweets without links as processed too
+                mark_tweet_processed(tweet_id)
         
-        new_launches = [t for t in launches if t.get("id_str") not in processed_tweet_ids]
+        new_launches = [t for t in launches if not is_tweet_processed(t.get("id_str"))]
         print(f"Found {len(new_launches)} new launch tweets with links from @launchcoin")
         return new_launches
     except Exception as e:
@@ -319,6 +347,11 @@ def check_launchcoin_activity() -> None:
         for tweet in launch_tweets:
             tweet_id = tweet.get("id_str")
             
+            # Skip already processed tweets
+            if is_tweet_processed(tweet_id):
+                print(f"Already processed tweet {tweet_id}, skipping")
+                continue
+                
             # Get the tweet text
             text = tweet.get("full_text") or tweet.get("text", "")
             
@@ -326,7 +359,7 @@ def check_launchcoin_activity() -> None:
             token_link = extract_token_link(text)
             if not token_link:
                 print(f"No token link found in tweet {tweet_id}, skipping")
-                processed_tweet_ids.add(tweet_id)
+                mark_tweet_processed(tweet_id)
                 continue
                 
             # Get the username being replied to
@@ -345,7 +378,7 @@ def check_launchcoin_activity() -> None:
             # If follower count is below threshold, skip this account and mark as processed
             if followers < FOLLOWER_THRESHOLD:
                 print(f"⛔ Skipping tweet for @{replied_to_username} - only has {followers:,} followers (below threshold of {FOLLOWER_THRESHOLD:,})")
-                processed_tweet_ids.add(tweet_id)
+                mark_tweet_processed(tweet_id)
                 save_processed_tweets()
                 continue
             
@@ -360,7 +393,7 @@ def check_launchcoin_activity() -> None:
             # Skip if the account is untrusted (below the min trust score)
             if trust_score < MIN_TRUST_SCORE:
                 print(f"⛔ Skipping tweet for @{replied_to_username} - untrusted account (Trust score: {trust_score})")
-                processed_tweet_ids.add(tweet_id)
+                mark_tweet_processed(tweet_id)
                 save_processed_tweets()
                 continue
             
@@ -391,7 +424,7 @@ def check_launchcoin_activity() -> None:
             if notification_sent:
                 print(f"✓ Sent notification to Telegram for @{replied_to_username}")
                 # Mark as processed after successful notification
-                processed_tweet_ids.add(tweet_id)
+                mark_tweet_processed(tweet_id)
                 save_processed_tweets()
             else:
                 print(f"⚠️ Failed to send notification for @{replied_to_username}, will try again later")
@@ -408,6 +441,7 @@ def main() -> None:
     print("===== Starting LaunchCoin Monitor Bot =====")
     print(f"Looking for accounts with {FOLLOWER_THRESHOLD:,}+ followers")
     print(f"Only showing accounts with trust score above {MIN_TRUST_SCORE}")
+    print(f"Maximum tweet history: {MAX_STORED_TWEET_IDS} tweets")
     notified_tweets.clear()  # Clear any existing tweet state
     
     # Load previously processed tweets
