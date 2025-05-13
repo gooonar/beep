@@ -333,7 +333,7 @@ def check_launchcoin_activity() -> None:
             replied_to_username = tweet.get("replied_to_user", {}).get("username", "unknown")
             print(f"Found launch for @{replied_to_username} (Tweet ID: {tweet_id})")
             
-            # Check follower count of the user being replied to
+            # Check follower count first - this is the primary filter
             followers = get_twitter_followers(replied_to_username)
             
             if followers is None:
@@ -342,7 +342,14 @@ def check_launchcoin_activity() -> None:
                 
             print(f"@{replied_to_username} has {followers:,} followers (threshold: {FOLLOWER_THRESHOLD:,})")
             
-            # Get trust score for the account
+            # If follower count is below threshold, skip this account and mark as processed
+            if followers < FOLLOWER_THRESHOLD:
+                print(f"⛔ Skipping tweet for @{replied_to_username} - only has {followers:,} followers (below threshold of {FOLLOWER_THRESHOLD:,})")
+                processed_tweet_ids.add(tweet_id)
+                save_processed_tweets()
+                continue
+            
+            # Only check trust score for accounts that pass the follower threshold
             trust_score = get_twitter_trust_score(replied_to_username)
             if trust_score is None:
                 print(f"Couldn't get trust score for @{replied_to_username}, will try again later")
@@ -356,45 +363,40 @@ def check_launchcoin_activity() -> None:
                 processed_tweet_ids.add(tweet_id)
                 save_processed_tweets()
                 continue
-                
-            if followers >= FOLLOWER_THRESHOLD:
-                print(f"✅ Found launch for account with {followers:,} followers: @{replied_to_username}")
-                print(f"Token link: {token_link}")
-                
-                # Extract contract address from the token link
-                contract_address = extract_contract_address(token_link)
-                
-                # Create links
-                twitter_link = f"https://twitter.com/{replied_to_username}"
-                tweet_link = f"https://twitter.com/{LAUNCHCOIN_USERNAME}/status/{tweet_id}"
-                
-                # Build the notification message
-                message = (
-                    "🚀 New Token Launch Detected! 🚀\n\n"
-                    f"Account: <a href='{twitter_link}'>@{replied_to_username}</a> ({followers:,} followers)\n"
-                    f"Trust: {trust_level}\n\n"
-                    f"Contract: <code>{contract_address}</code>\n\n"
-                    f"🔍 <a href='{token_link}'>View on Believe</a>\n"
-                    f"🐦 <a href='{tweet_link}'>View Launch Tweet</a>"
-                )
-                
-                # Send notification using the robust method
-                notification_sent = send_telegram_notification(message)
-                
-                if notification_sent:
-                    print(f"✓ Sent notification to Telegram for @{replied_to_username}")
-                    # Mark as processed after successful notification
-                    processed_tweet_ids.add(tweet_id)
-                    save_processed_tweets()
-                else:
-                    print(f"⚠️ Failed to send notification for @{replied_to_username}, will try again later")
-                    # Wait a bit before trying the next notification to avoid overwhelming the pool
-                    time.sleep(3)  
-            else:
-                print(f"⛔ Skipping tweet for @{replied_to_username} - only has {followers:,} followers (below threshold of {FOLLOWER_THRESHOLD:,})")
-                # Mark lower-follower accounts as processed too
+            
+            # If we get here, the account has passed both filters
+            print(f"✅ Found launch for account with {followers:,} followers and trust score {trust_score}: @{replied_to_username}")
+            print(f"Token link: {token_link}")
+            
+            # Extract contract address from the token link
+            contract_address = extract_contract_address(token_link)
+            
+            # Create links
+            twitter_link = f"https://twitter.com/{replied_to_username}"
+            tweet_link = f"https://twitter.com/{LAUNCHCOIN_USERNAME}/status/{tweet_id}"
+            
+            # Build the notification message
+            message = (
+                "🚀 New Token Launch Detected! 🚀\n\n"
+                f"Account: <a href='{twitter_link}'>@{replied_to_username}</a> ({followers:,} followers)\n"
+                f"Trust: {trust_level}\n\n"
+                f"Contract: <code>{contract_address}</code>\n\n"
+                f"🔍 <a href='{token_link}'>View on Believe</a>\n"
+                f"🐦 <a href='{tweet_link}'>View Launch Tweet</a>"
+            )
+            
+            # Send notification using the robust method
+            notification_sent = send_telegram_notification(message)
+            
+            if notification_sent:
+                print(f"✓ Sent notification to Telegram for @{replied_to_username}")
+                # Mark as processed after successful notification
                 processed_tweet_ids.add(tweet_id)
                 save_processed_tweets()
+            else:
+                print(f"⚠️ Failed to send notification for @{replied_to_username}, will try again later")
+                # Wait a bit before trying the next notification to avoid overwhelming the pool
+                time.sleep(3)
                 
     except Exception as e:
         print(f"Error checking @launchcoin activity: {e}")
