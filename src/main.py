@@ -419,8 +419,8 @@ def main() -> None:
     check_launchcoin_activity()
     
     # Schedule to run every 30 seconds for launchcoin activity
-    print(f"Scheduling LaunchCoin checks every 12 seconds")
-    schedule.every(0.2).minutes.do(check_launchcoin_activity)
+    print(f"Scheduling LaunchCoin checks every 30 seconds")
+    schedule.every(0.5).minutes.do(check_launchcoin_activity)
     
     try:
         print("Bot is running. Press CTRL+C to stop.")
