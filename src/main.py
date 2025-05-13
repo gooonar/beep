@@ -533,6 +533,13 @@ def check_launchcoin_activity() -> None:
             print(f"✅ Found launch for account with {followers:,} followers and trust score {trust_score}: @{replied_to_username}")
             print(f"Token link: {token_link}")
             
+            # Get top followers for high trust accounts
+            top_followers_info = ""
+            if trust_score > 300:
+                print(f"Trust score > 300, fetching top followers for @{replied_to_username}")
+                top_followers = get_top_followers(replied_to_username)
+                top_followers_info = format_top_followers(top_followers)
+            
             # Extract contract address from the token link
             contract_address = extract_contract_address(token_link)
             
@@ -545,12 +552,18 @@ def check_launchcoin_activity() -> None:
             if coin_name and ticker:
                 coin_info = f"Coin: <b>{coin_name}</b> (<code>{ticker}</code>)\n"
             
+            # Add top followers section if available
+            followers_section = ""
+            if top_followers_info:
+                followers_section = f"{top_followers_info}\n"
+            
             message = (
                 "🚀 New Token Launch Detected! 🚀\n\n"
                 f"Account: <a href='{twitter_link}'>@{replied_to_username}</a> ({followers:,} followers)\n"
                 f"Trust: {trust_level}\n"
                 f"{coin_info}"
                 f"Contract: <code>{contract_address}</code>\n\n"
+                f"{followers_section}"
                 f"🔍 <a href='{token_link}'>View on Believe</a>\n"
                 f"🐦 <a href='{tweet_link}'>View Launch Tweet</a>"
             )
@@ -585,6 +598,50 @@ def check_launchcoin_activity() -> None:
         print(f"Error checking @launchcoin activity: {e}")
         import traceback
         traceback.print_exc()
+
+def get_top_followers(username: str) -> List[Dict]:
+    """Get top followers for a Twitter username using TweetScout API."""
+    global tweetscout_request_count
+    tweetscout_request_count += 1
+    try:
+        print(f"Getting top followers for @{username}...")
+        headers = {
+            "Accept": "application/json",
+            "ApiKey": TWEETSCOUT_API_KEY
+        }
+        
+        params = {
+            "from": "db"
+        }
+        
+        response = requests.get(
+            f"https://api.tweetscout.io/v2/top-followers/{username}",
+            headers=headers,
+            params=params
+        )
+        
+        response.raise_for_status()
+        data = response.json()
+        print(f"Found {len(data)} top followers for @{username}")
+        return data[:10]  # Return top 10 followers
+    except Exception as e:
+        print(f"Error getting top followers for {username}: {e}")
+        return []
+
+def format_top_followers(followers: List[Dict]) -> str:
+    """Format top followers into a message string."""
+    if not followers:
+        return ""
+        
+    message = "🔝 <b>Top Followers:</b>\n"
+    for i, follower in enumerate(followers[:10], 1):
+        screen_name = follower.get("screeName", "unknown")
+        score = follower.get("score", 0)
+        followers_count = follower.get("followersCount", 0)
+        
+        message += f"{i}. <a href='https://twitter.com/{screen_name}'>@{screen_name}</a> - Score: {score:.1f} ({followers_count:,} followers)\n"
+    
+    return message
 
 def main() -> None:
     """Main function to run the bot."""
